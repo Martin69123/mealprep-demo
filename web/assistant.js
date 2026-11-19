@@ -5,6 +5,9 @@ import { checkContext, parseProposal } from '../core/assistant.js';
 
 /** @returns {Promise<{ available: boolean, model?: string, reason?: string }>} never rejects */
 export async function status() {
+  // The assistant's server exists only on the PC. On a hosted copy (the phone) there is nothing to
+  // ask, so do not send a request at all.
+  if (!['localhost', '127.0.0.1'].includes(window.location.hostname)) return { available: false, reason: 'server' };
   try {
     const res = await fetch('/api/assistant/status', { cache: 'no-store' });
     return res.ok ? await res.json() : { available: false, reason: 'server' };

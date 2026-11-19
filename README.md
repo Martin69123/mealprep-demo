@@ -8,4 +8,4 @@ data only on the device it is opened on. It is not a finished product and gives 
   (doi:10.11583/DTU.29500682), CC BY 4.0. The data is a rounded subset. DTU does not endorse this app.
 - Everything else in this repository is © its author, all rights reserved.
 
-Published from source commit 749a9f1.
+Published from source commit cb086d5.
