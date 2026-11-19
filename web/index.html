@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="da">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f6f7f5" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#111613" media="(prefers-color-scheme: dark)">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Mealprep">
+  <meta name="format-detection" content="telephone=no">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Mealprep &amp; træning — prototype</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top">
+    <h1 id="title"></h1>
+    <button id="lang" class="ghost" type="button"></button>
+  </header>
+  <nav id="tabs" class="tabs" aria-label="Sektioner"></nav>
+  <main id="view" tabindex="-1"></main>
+  <datalist id="food-list"></datalist>
+  <footer id="notice" class="notice"></footer>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
