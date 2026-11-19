@@ -5,7 +5,7 @@
 // Strategy: try the network first so a new version arrives when online; fall back to the copy
 // saved on the device when offline.
 
-const CACHE = 'mealprep-app-v1';
+const CACHE = 'mealprep-app-v2';
 // Every file the app needs. A test checks that this list matches the files in web/ and core/.
 const FILES = [
   './',
@@ -50,7 +50,9 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
   if (request.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return;
   event.respondWith(
-    fetch(request)
+    // 'no-cache' makes the browser check with the server instead of trusting its own HTTP cache,
+    // so a new version is picked up the next time the app is opened online.
+    fetch(request, { cache: 'no-cache' })
       .then((response) => {
         if (response.ok) {
           const copy = response.clone();
