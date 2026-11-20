@@ -7,7 +7,7 @@ import * as K from '../core/tracking.js';
 import * as B from '../core/batches.js';
 import * as P from '../core/planning.js';
 import { FOODS, MICRO_UNITS, microTotals, addMicroTotals, againstReference } from '../core/foods.js';
-import { RECIPES, EXERCISES, TEMPLATES, DATA_NOTICE, DEFAULT_PACKS, LEGACY_IDS, SECTIONS, sectionOf, byId } from '../core/seed.js';
+import { RECIPES, EXERCISES, TEMPLATES, DATA_NOTICE, DEFAULT_PACKS, EXAMPLE_PRICES, SECTIONS, sectionOf, byId } from '../core/seed.js';
 import { STRINGS } from './i18n.js';
 import * as store from './store.js';
 import * as assistant from './assistant.js';
@@ -341,6 +341,7 @@ function viewPlan() {
 
 function viewShop() {
   const today = todayISO();
+  foodLabels(); // fills the shared food datalist
   const bud = budgetText(shoppingLines());
   const days = weekDates();
   // Still to buy first, then what the pantry already covers; grouped by shop section.
@@ -392,6 +393,10 @@ function viewShop() {
       ${stock.map((l) => `<tr><td class="title">${nm(foods.get(l.foodId))} ${dateTag(l.useBy)}</td><td class="n" data-label="${t('inStock')}"><input class="num" inputmode="decimal" data-act="pantry" data-food="${l.foodId}" data-useby="${l.useBy ?? ''}" aria-label="${t('inStock')} ${nm(foods.get(l.foodId))} ${l.useBy ? shortDate(l.useBy) : ''}" value="${fmt(l.grams, 1).replace(/\s/g, '')}"></td>
         <td class="n" data-label="${t('useBy')}"><input type="date" data-act="pantryDate" data-food="${l.foodId}" data-useby="${l.useBy ?? ''}" aria-label="${t('useBy')} ${nm(foods.get(l.foodId))} ${l.useBy ? shortDate(l.useBy) : ''}" value="${l.useBy ?? ''}"></td></tr>`).join('')}
     </tbody></table></div>`}
+    <div class="row"><input class="food grow" list="food-list" id="stock-food" aria-label="${t('addStockFood')}" placeholder="${t('searchFood')}">
+      <input class="num" inputmode="decimal" id="stock-grams" aria-label="${t('inStock')}" placeholder="g">
+      <input type="date" id="stock-date" aria-label="${t('useBy')} (${t('optionalWord')})">
+      <button type="button" data-act="addStock">${t('addStock')}</button></div>
     <p class="muted">${t('lotNote')} ${t('dateNote')}</p>
   </section>
   ${viewBatches()}`;
@@ -500,19 +505,23 @@ function viewTrain() {
   </section>`;
 }
 
-/** Heaviest logged set per training day for one exercise. */
-function exerciseChart(history) {
-  if (history.length < 2) return '';
+/** A line through dated values, with a dot per value. `label` is read out instead of the picture. */
+function lineChart(points, label) {
+  if (points.length < 2) return '';
   const W = 600, H = 160, pad = 14;
-  const xs = history.map((p) => Date.parse(p.date));
-  const ys = history.map((p) => p.topKg);
-  const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys) - 1, Math.max(...ys) + 1];
+  const xs = points.map((p) => Date.parse(p.date));
+  const ys = points.map((p) => p.value);
+  const margin = Math.max((Math.max(...ys) - Math.min(...ys)) * 0.1, 0.5);
+  const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys) - margin, Math.max(...ys) + margin];
   const X = (v) => pad + ((v - x0) / (x1 - x0 || 1)) * (W - 2 * pad);
   const Y = (v) => H - pad - ((v - y0) / (y1 - y0 || 1)) * (H - 2 * pad);
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${t('progressTitle')}: ${t('topSet')} ${fmt(ys[0], 2)} → ${fmt(ys.at(-1), 2)} kg">
-    <polyline class="trend" points="${history.map((p, i) => `${X(xs[i]).toFixed(1)},${Y(p.topKg).toFixed(1)}`).join(' ')}"/>
-    ${history.map((p, i) => `<circle class="raw" r="3" cx="${X(xs[i]).toFixed(1)}" cy="${Y(p.topKg).toFixed(1)}"/>`).join('')}</svg>`;
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${label}">
+    <polyline class="trend" points="${points.map((p, i) => `${X(xs[i]).toFixed(1)},${Y(p.value).toFixed(1)}`).join(' ')}"/>
+    ${points.map((p, i) => `<circle class="raw" r="3" cx="${X(xs[i]).toFixed(1)}" cy="${Y(p.value).toFixed(1)}"/>`).join('')}</svg>`;
 }
+/** Heaviest logged set per training day for one exercise. */
+const exerciseChart = (history) => lineChart(history.map((d) => ({ date: d.date, value: d.topKg })),
+  history.length < 2 ? '' : `${t('progressTitle')}: ${t('topSet')} ${fmt(history[0].topKg, 2)} → ${fmt(history.at(-1).topKg, 2)} kg`);
 
 // ---------- rest timer (not stored: it is only a clock on the screen) ----------
 const REST_CHOICES = [60, 90, 120, 180, 240];
@@ -585,7 +594,7 @@ function viewMeasures() {
       const unit = m.unit ? ` ${esc(m.unit)}` : '';
       return `<div class="day"><div class="row between"><h3>${esc(m.name)}</h3>
         <button type="button" class="ghost danger" data-act="removeMeasure" data-id="${esc(m.id)}" aria-label="${t('remove')} ${esc(m.name)}">✕</button></div>
-        ${series.length === 0 ? `<p class="muted">${t('noValues')}</p>` : `<div class="tablewrap"><table><thead><tr><th>${t('date')}</th><th class="n">${t('value')}</th><th class="n">${t('changeSinceFirst')}</th><th></th></tr></thead><tbody>
+        ${series.length === 0 ? `<p class="muted">${t('noValues')}</p>` : `${lineChart(series, `${esc(m.name)}: ${fmt(series[0].value, 1)} → ${fmt(series.at(-1).value, 1)}${unit}`)}<div class="tablewrap"><table><thead><tr><th>${t('date')}</th><th class="n">${t('value')}</th><th class="n">${t('changeSinceFirst')}</th><th></th></tr></thead><tbody>
           ${[...series].reverse().slice(0, 8).map((x) => `<tr><td>${shortDate(x.date)}${x.date.slice(0, 4)}</td><td class="n">${fmt(x.value, 1)}${unit}</td><td class="n">${signed(x.change, 1)}${unit}</td>
             <td class="n"><button type="button" class="ghost danger" data-act="removeMeasurement" data-id="${esc(m.id)}" data-date="${x.date}" aria-label="${t('remove')}">✕</button></td></tr>`).join('')}
         </tbody></table></div>`}</div>`;
@@ -942,6 +951,15 @@ const clickActions = {
     state.lots = I.applyPurchase(state.lots, shoppingLines());
     commit(t('boughtDone'));
   },
+  addStock: () => {
+    const foodId = foodLabels().toId.get(document.getElementById('stock-food').value.trim().toLowerCase());
+    const grams = num(document.getElementById('stock-grams').value);
+    const date = document.getElementById('stock-date').value;
+    if (!foodId) return commit(t('foodNotFound'));
+    if (grams == null || grams <= 0 || grams > 1e6 || !(date === '' || isISODate(date))) return commit(t('invalid'));
+    state.lots = I.addLot(state.lots, foodId, grams, date === '' ? null : date);
+    commit(`${foods.get(foodId).name[state.lang]}: ${fmt(grams)} g ${t('boughtOneDone')}`);
+  },
   boughtOne: (el) => {
     const line = shoppingLines().find((l) => l.foodId === el.dataset.food);
     const date = document.getElementById(`buy-date-${el.dataset.food}`)?.value ?? '';
@@ -951,9 +969,7 @@ const clickActions = {
   },
   examplePrices: () => {
     // Made-up demo figures (kr. per pack) — flagged as examples, never shown as observed prices.
-    const demo = { chicken: 6500, beef: 3500, salmon: 4500, tofu: 2000, eggs: 2800, skyr: 2200, milk: 1300, rice: 1600, pasta: 1200, oats: 1400, potato: 1800, broccoli: 1200, carrot: 1000, onion: 1000, tomato: 600, beans: 700, banana: 1500, oil: 5500 };
-    for (const [key, priceOre] of Object.entries(demo)) {
-      const id = LEGACY_IDS[key];
+    for (const [id, priceOre] of Object.entries(EXAMPLE_PRICES)) {
       if (!state.prices[id]) state.prices[id] = { priceOre, priceDate: todayISO(), example: true };
     }
     commit();
@@ -1197,7 +1213,7 @@ const clickActions = {
     const lang = state.lang;
     store.clear();
     state = { ...store.freshState(), lang };
-    Object.assign(ui, { recipeId: state.recipes[0].id, dayIndex: 0 });
+    Object.assign(ui, { recipeId: state.recipes[0].id, dayIndex: 0, week: mondayOf(todayISO()), trainDate: todayISO(), restUntil: null, aiResult: null, aiText: '', measureId: undefined, lastExercise: undefined, lastReps: undefined, lastKg: undefined });
     commit(t('deleted'));
   },
 };

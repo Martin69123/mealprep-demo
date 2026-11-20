@@ -50,7 +50,8 @@ tr.section th { text-align: left; font-size: .8rem; text-transform: uppercase; l
 input[type=checkbox] { width: 1.2rem; height: 1.2rem; accent-color: var(--accent); }
 details { margin: 10px 0; }
 summary { cursor: pointer; color: var(--muted); padding: 6px 0; }
-#rest-clock { font-variant-numeric: tabular-nums; min-width: 6.5em; }
+#rest-clock { font-variant-numeric: tabular-nums; }
+#rest-clock:not(:empty) { min-width: 6.5em; }
 select.meal { font-size: .85rem; padding-block: 2px; }
 label.inline { display: inline-flex; flex-direction: row; align-items: center; gap: 8px; flex-wrap: wrap; }
 input.food { width: 100%; min-width: 9em; }

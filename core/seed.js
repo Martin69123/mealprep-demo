@@ -77,6 +77,19 @@ const MORE = {
 export const LEGACY_IDS = Object.fromEntries(Object.entries(STARTER).map(([k, [id]]) => [k, fridaId(id)]));
 /** Recipe key → food id, for every food the built-in recipes use. */
 const KEYS = Object.fromEntries(Object.entries({ ...STARTER, ...MORE }).map(([k, [id]]) => [k, fridaId(id)]));
+// MADE-UP demo prices in øre per assumed pack, so the budget can be tried without typing prices.
+// They are not observed in any shop. The app marks every one of them as an example.
+const DEMO_PRICES = {
+  chicken: 6500, beef: 3500, salmon: 4500, tofu: 2000, eggs: 2800, skyr: 2200, milk: 1300, rice: 1600, pasta: 1200, oats: 1400, potato: 1800, broccoli: 1200,
+  carrot: 1000, onion: 1000, tomato: 600, beans: 700, banana: 1500, oil: 5500,
+  turkeyMince: 3500, porkMince: 3000, cod: 5500, tuna: 1500, shrimp: 3500, mackerel: 1200, lentils: 1800, chickpeas: 700, blackBeans: 800, edamame: 2200,
+  cottage: 1600, feta: 1500, cheese: 3500, cream: 900, rye: 1800, bulgur: 1500, quinoa: 2500, barley: 1400, muesli: 2800, sweetPotato: 2000, spinach: 1200,
+  pepper: 1800, cucumber: 800, freshTomato: 1500, peas: 1400, corn: 800, cabbage: 1200, leek: 1200, mushroom: 1500, garlic: 800, apple: 1800, blueberry: 2500,
+  raspberry: 2500, almond: 2800, soy: 1500, curry: 1200,
+};
+/** Made-up example price in øre per pack, per food id. Examples only — never shown as real prices. */
+export const EXAMPLE_PRICES = Object.fromEntries(Object.entries(DEMO_PRICES).map(([key, ore]) => [KEYS[key], ore]));
+
 /** Shop sections in the order the shopping list shows them. 'other' holds every food without an assumption. */
 export const SECTIONS = ['produce', 'bread', 'meat', 'chilled', 'dairy', 'dry', 'canned', 'frozen', 'other'];
 const FOOD_SECTIONS = Object.fromEntries(Object.values({ ...STARTER, ...MORE }).map(([id, , section]) => [fridaId(id), section]));
