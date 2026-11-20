@@ -83,6 +83,21 @@ export function buildShoppingList(needs, pantry, products) {
 }
 
 /**
+ * Lines grouped by shop section in the given section order; the order of lines inside a section
+ * is kept. Sections without lines are left out.
+ * @param {ShoppingLine[]} lines @param {(foodId: string) => string} sectionOf @param {string[]} order
+ * @returns {{ section: string, lines: ShoppingLine[] }[]}
+ */
+export function bySection(lines, sectionOf, order) {
+  const groups = new Map(order.map((s) => [s, []]));
+  for (const l of lines) {
+    const s = groups.has(sectionOf(l.foodId)) ? sectionOf(l.foodId) : order.at(-1);
+    groups.get(s).push(l);
+  }
+  return [...groups].filter(([, list]) => list.length > 0).map(([section, list]) => ({ section, lines: list }));
+}
+
+/**
  * Known total plus how many lines lack a price — the total is a lower bound when missing > 0.
  * @param {ShoppingLine[]} lines
  */

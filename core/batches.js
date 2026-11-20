@@ -2,7 +2,7 @@
 // A batch is created when the user says they cooked a recipe. It takes raw ingredients from the
 // pantry once; meals eaten from the batch then take portions, not raw ingredients.
 import { aggregateNeeds } from './shopping.js';
-import { consume } from './inventory.js';
+import { take as takeStock, takenTotals } from './inventory.js';
 
 const EPS = 1e-9;
 
@@ -16,6 +16,7 @@ const EPS = 1e-9;
  * @property {number} servingsLeft
  * @property {string | null} useBy  the user's own date; the app never sets or suggests one
  * @property {Record<string, number>} consumed raw grams actually taken from the pantry
+ * @property {import('./inventory.js').Lot[]} [taken] which stock lots gave what, so undoing puts each amount back under its date
  */
 /** @typedef {{ batchId: string, servings: number }} Take */
 
@@ -32,14 +33,11 @@ export function usable(batches, today) {
  * Take the raw ingredients for `servings` of a recipe from the pantry. Anything not in stock is
  * reported as a shortage and is NOT taken — the batch records only what really left the pantry.
  */
-export function cook(pantry, recipe, servings) {
+export function cook(lots, recipe, servings, today) {
   if (!(servings > 0)) throw new RangeError('servings must be > 0');
   const used = aggregateNeeds([{ recipeId: recipe.id, servings }], new Map([[recipe.id, recipe]]));
-  const result = consume(pantry, used);
-  const consumed = Object.fromEntries(
-    [...used].map(([id, g]) => [id, g - (result.shortages.get(id) ?? 0)]).filter(([, g]) => g > EPS),
-  );
-  return { pantry: result.pantry, shortages: result.shortages, consumed };
+  const result = takeStock(lots, used, today);
+  return { lots: result.lots, shortages: result.shortages, consumed: takenTotals(result.taken), taken: result.taken };
 }
 
 /**

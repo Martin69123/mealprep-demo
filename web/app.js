@@ -6,12 +6,13 @@ import * as T from '../core/training.js';
 import * as K from '../core/tracking.js';
 import * as B from '../core/batches.js';
 import * as P from '../core/planning.js';
-import { FOODS, MICRO_UNITS, microTotals } from '../core/foods.js';
-import { RECIPES, EXERCISES, TEMPLATES, DATA_NOTICE, DEFAULT_PACKS, LEGACY_IDS, byId } from '../core/seed.js';
+import { FOODS, MICRO_UNITS, microTotals, addMicroTotals, againstReference } from '../core/foods.js';
+import { RECIPES, EXERCISES, TEMPLATES, DATA_NOTICE, DEFAULT_PACKS, LEGACY_IDS, SECTIONS, sectionOf, byId } from '../core/seed.js';
 import { STRINGS } from './i18n.js';
 import * as store from './store.js';
 import * as assistant from './assistant.js';
 import { snapshotOf, recipeForEntry, isISODate } from '../core/state.js';
+import { recipeLabel, applyActions } from '../core/assistant.js';
 
 const foods = byId(FOODS);
 const seedRecipes = byId(RECIPES);
@@ -41,7 +42,8 @@ const num = (text) => {
   return String(text).trim() !== '' && Number.isFinite(v) ? v : null;
 };
 const recipeMap = () => byId(state.recipes);
-const pantryMap = () => new Map(Object.entries(state.pantry));
+/** Grams per food that can be used today: stock past the user's own date is not counted. */
+const pantryMap = () => I.totals(state.lots, todayISO());
 const weekDates = () => Array.from({ length: 7 }, (_, i) => K.addDays(ui.week, i));
 const weekEntries = () => state.plan.filter((e) => e.date >= ui.week && e.date <= K.addDays(ui.week, 6));
 const entryRecipe = (e) => recipeForEntry(e, recipeMap());
@@ -71,11 +73,14 @@ function foodLabels() {
     .sort((a, b) => a.localeCompare(b, locale())).map((l) => `<option value="${esc(l)}">`).join('');
   return (labelCache = { lang: state.lang, byId: byIdMap, toId });
 }
+const mealOptions = (selected) => `<option value="">${t('mealNone')}</option>` + P.MEAL_TYPES.map((m) => `<option value="${m}"${m === selected ? ' selected' : ''}>${t(m)}</option>`).join('');
+const isFavourite = (id) => state.favorites.includes(id);
+/** Recipes for a picker: favourites first, marked with a star. */
+const recipeOptions = (selected) => options(P.favouritesFirst(state.recipes, state.favorites), selected, (r) => `${isFavourite(r.id) ? '★ ' : ''}${nm(r)}`);
 const options = (list, selected, label = nm) =>
   list.map((x) => `<option value="${esc(x.id)}"${x.id === selected ? ' selected' : ''}>${label(x)}</option>`).join('');
 
 function commit(flash = '') {
-  for (const id of Object.keys(state.pantryDates)) if (!(state.pantry[id] > 0)) delete state.pantryDates[id];
   ui.flash = store.save(state) ? flash : t('saveFailed');
   render();
 }
@@ -107,9 +112,54 @@ const macroLine = (n) => {
 const statusTag = (s) => `<span class="tag ${s}">${t(s)}</span>`;
 
 // ---------- views ----------
+/** Micronutrients of planned meals (not skipped) against the EU labelling reference values. */
+function microCard(title, entries, days) {
+  if (entries.length === 0 || !(days > 0)) return '';
+  const totals = addMicroTotals(entries.map((e) => { const r = entryRecipe(e); return microTotals(r.ingredients, foods, e.servings / r.servings); }));
+  const rows = againstReference(totals, days);
+  return `<details><summary>${title}</summary>
+    <div class="tablewrap"><table><thead><tr><th></th><th class="n">${days > 1 ? t('perDayWord') : t('amount')}</th><th class="n">${t('ofReference')}</th></tr></thead><tbody>
+      ${rows.map((r) => `<tr><td>${t('micro')[r.key]}</td><td class="n">${r.unknown ? '≥ ' : ''}${fmt(r.perDay, r.perDay < 10 ? 2 : 0)} ${MICRO_UNITS[r.key]}</td>
+        <td class="n">${r.percent == null ? `<span class="muted">${t('noReference')}</span>` : `${r.unknown ? '≥ ' : ''}${fmt(r.percent)} %`}</td></tr>`).join('')}
+    </tbody></table></div>
+    <p class="muted">${t('referenceNote')} ${t('microNote')}</p></details>`;
+}
+
+/** A text with {placeholders} filled in. */
+const tf = (key, vars) => t(key).replace(/\{(\w+)\}/g, (_, k) => vars[k]);
+/** The week summary as sentences. Put together from the app's own numbers; no AI is involved. */
+function weekWords(sum) {
+  const out = [];
+  out.push(sum.meals.total === 0 ? t('wwNoMeals') : tf('wwMeals', { c: sum.meals.confirmed, n: sum.meals.total, a: sum.meals.assumed, s: sum.meals.skipped }));
+  if (sum.meals.total > 0) {
+    out.push(sum.confirmedDays === 0 ? t('wwNoFood') : tf('wwFood', { d: sum.confirmedDays, kcal: fmt(sum.confirmed.kcal / sum.confirmedDays), protein: fmt(sum.confirmed.protein / sum.confirmedDays), gk: state.goal.kcal, gp: state.goal.protein }));
+  }
+  out.push(sum.sets === 0 ? t('wwNoTraining') : tf('wwTraining', { sets: sum.sets, days: sum.trainingDays, kg: fmt(sum.volumeKg) }));
+  out.push(sum.weighIns === 0 ? t('wwNoWeight') : sum.weightChangeKg == null ? t('wwOneWeight') : tf('wwWeight', { delta: signed(sum.weightChangeKg, 1), n: sum.weighIns }));
+  return out.join(' ');
+}
+const signed = (x, digits) => `${x > 0 ? '+' : ''}${fmt(x, digits)}`;
+/** Tag for a deadline the user set: days left, or that it has passed. */
+function deadlineTag(date) {
+  if (!date) return '';
+  const d = P.daysBetween(todayISO(), date);
+  return d < 0 ? `<span class="tag expired">${t('deadlinePassed')} ${shortDate(date)}</span>` : `<span class="muted">${shortDate(date)} · ${d} ${t(d === 1 ? 'dayLeft' : 'daysLeft')}</span>`;
+}
+/** The weight target against the logged weigh-ins. Arithmetic only. */
+function targetLine() {
+  const g = state.goal;
+  if (g.targetKg == null) return '';
+  const s = K.weightGoalStatus(state.weights, g.targetKg, g.deadline, todayISO());
+  if (!s) return `<p class="muted">${t('targetNoWeight')}</p>`;
+  if (s.reached) return `<p><span class="tag confirmed">${t('targetReached')}</span> <span class="muted">${t('trendNow')}: ${fmt(s.currentKg, 1)} kg</span></p>`;
+  return `<p>${t('trendNow')}: <strong>${fmt(s.currentKg, 1)} kg</strong> · <strong>${signed(s.remainingKg, 1)} kg</strong> ${t('targetLeft')}
+    ${g.deadline ? ` · ${deadlineTag(g.deadline)}` : ''}${s.perWeekKg != null ? ` · ${t('perWeekNeeded')}: <strong>${signed(s.perWeekKg, 2)} kg</strong>` : ''}</p>
+    <p class="muted">${t('targetNote')}</p>`;
+}
+
 function viewHome() {
   const today = todayISO();
-  const todays = state.plan.filter((e) => e.date === today && e.status !== 'skipped');
+  const todays = P.sortMeals(state.plan.filter((e) => e.date === today && e.status !== 'skipped'));
   const sumOf = (list) => N.sum(list.map(entryNutrients));
   const total = sumOf(todays);
   const confirmed = sumOf(todays.filter((e) => e.status === 'confirmed'));
@@ -120,7 +170,7 @@ function viewHome() {
   const prs = T.detectPRs(state.workouts).slice(-5).reverse();
   const g = state.goal;
   foodLabels(); // fills the shared food datalist
-  const dated = Object.keys(state.pantryDates).map((id) => P.daysBetween(today, state.pantryDates[id]));
+  const dated = I.useFirst(state.lots, today).map((l) => l.daysLeft);
   const ready = B.usable(state.batches, today).reduce((acc, b) => acc + b.servingsLeft, 0);
   const latest = [...state.weights].sort((a, b) => a.date.localeCompare(b.date)).at(-1);
   const perKg = latest ? `${fmt(g.protein / latest.kg, 2)} ${t('proteinPerKg')} (${fmt(latest.kg, 1)} kg, ${shortDate(latest.date)})` : t('proteinPerKgNone');
@@ -133,6 +183,23 @@ function viewHome() {
       <label>${t('kcalTarget')}<input class="num" inputmode="numeric" data-act="goal" data-field="kcal" value="${g.kcal}"></label>
       <label>${t('proteinTarget')}<input class="num" inputmode="numeric" data-act="goal" data-field="protein" value="${g.protein}"></label>
     </div><p class="muted">${perKg}</p>
+    <div class="row">
+      <label>${t('targetKg')}<input class="num" inputmode="decimal" data-act="goal" data-field="targetKg" value="${g.targetKg ?? ''}"></label>
+      <label>${t('deadline')}<input type="date" data-act="goal" data-field="deadline" value="${g.deadline ?? ''}"></label>
+    </div>
+    ${targetLine()}
+    <h3>${t('milestones')}</h3>
+    ${state.milestones.length === 0 ? `<p class="muted">${t('milestonesEmpty')}</p>` : `<ul class="plain">${state.milestones.map((m) => `<li class="row between">
+      <label class="inline"><input type="checkbox" data-act="milestoneDone" data-id="${esc(m.id)}"${m.done ? ' checked' : ''}> <span${m.done ? ' class="muted"' : ''}>${esc(m.text)}</span></label>
+      <span class="row">${m.done ? `<span class="tag confirmed">${t('doneTag')}</span>` : deadlineTag(m.date)}
+        <button type="button" class="ghost danger" data-act="removeMilestone" data-id="${esc(m.id)}" aria-label="${t('remove')} ${esc(m.text)}">✕</button></span></li>`).join('')}</ul>`}
+    <div class="row"><input class="grow" id="ms-text" maxlength="80" aria-label="${t('milestoneText')}" placeholder="${t('milestoneHint')}">
+      <input type="date" id="ms-date" aria-label="${t('deadline')}">
+      <button type="button" data-act="addMilestone">${t('addMilestone')}</button></div>
+    <details><summary>${t('goalHistory')} (${state.goalHistory.length})</summary>
+      ${state.goalHistory.length === 0 ? `<p class="muted">${t('goalHistoryEmpty')}</p>` : `<div class="tablewrap"><table><thead><tr><th>${t('date')}</th><th>${t('goalType')}</th><th class="n">kcal</th><th class="n">Protein (g)</th></tr></thead><tbody>
+        ${[...state.goalHistory].reverse().slice(0, 20).map((h) => `<tr><td>${shortDate(h.date)}${h.date.slice(0, 4)}</td><td>${t(h.type)}</td><td class="n">${h.kcal}</td><td class="n">${h.protein}</td></tr>`).join('')}
+      </tbody></table></div>`}</details>
     <h3>${t('avoidTitle')}</h3>
     ${state.goal.avoid.length === 0 ? `<p class="muted">${t('avoidNone')}</p>` : `<div class="row">${state.goal.avoid.map((id) =>
       `<span class="tag">${nm(foods.get(id))} <button type="button" class="chip" data-act="removeAvoid" data-food="${id}" aria-label="${t('remove')} ${nm(foods.get(id))}">✕</button></span>`).join('')}</div>`}
@@ -147,7 +214,8 @@ function viewHome() {
       <div><div class="stat">${fmt(total.protein)} g protein</div><div class="muted">${t('planned')} · ${fmt((total.protein / g.protein) * 100)} % ${t('ofTarget')}</div>
         <progress max="${g.protein}" value="${Math.min(total.protein, g.protein)}"></progress></div>
     </div>
-    <p class="muted">${statusTag('confirmed')} ${fmt(confirmed.kcal)} kcal · ${statusTag('assumed')} ${fmt(total.kcal - confirmed.kcal)} kcal</p>`}
+    <p class="muted">${statusTag('confirmed')} ${fmt(confirmed.kcal)} kcal · ${statusTag('assumed')} ${fmt(total.kcal - confirmed.kcal)} kcal</p>
+    ${microCard(t('microToday'), todays, 1)}`}
   </section>
   <section class="grid">
     <div class="card"><h2>${t('weekBudget')}</h2><div class="stat">${bud.main}</div><div class="muted">${bud.sub}</div></div>
@@ -176,22 +244,30 @@ function viewPlan() {
   const days = weekDates();
   const covered = coverage();
   const dayBlocks = days.map((date, i) => {
-    const entries = state.plan.filter((e) => e.date === date);
+    const entries = P.sortMeals(state.plan.filter((e) => e.date === date));
     const total = N.sum(entries.filter((e) => e.status !== 'skipped').map(entryNutrients));
+    const targets = [...days.filter((d) => d !== date).map((d) => [d, `${t('days')[days.indexOf(d)]} ${shortDate(d)}`]),
+      [K.addDays(date, 7), `${t('days')[i]} ${shortDate(K.addDays(date, 7))} (${t('nextWeekWord')})`]];
     return `<div class="day">
       <div class="row between"><h3>${t('days')[i]} ${shortDate(date)}</h3>
         <span class="muted">${t('dayTotal')}: ${fmt(total.kcal)} / ${state.goal.kcal} kcal · ${fmt(total.protein)} / ${state.goal.protein} g protein</span></div>
       <ul class="plain">${entries.map((e) => `<li class="row between">
-        <span>${nm(entryRecipe(e))} <span class="muted">× ${fmt(e.servings, 2)} · ${macroLine(entryNutrients(e))}${recipeMap().has(e.recipeId) ? '' : ` · ${t('recipeDeleted')}`}</span>
+        <span><select class="meal" data-act="mealType" data-id="${e.id}" aria-label="${t('mealType')}">${mealOptions(e.meal)}</select>
+          <select class="meal" data-act="moveMeal" data-id="${e.id}" aria-label="${t('moveMeal')}"${e.status === 'confirmed' ? ' disabled' : ''}>${days.map((d, di) => `<option value="${d}"${d === date ? ' selected' : ''}>${d === date ? t('days')[di] : `→ ${t('days')[di]}`}</option>`).join('')}</select>
+          ${nm(entryRecipe(e))} <span class="muted">× ${fmt(e.servings, 2)} · ${macroLine(entryNutrients(e))}${recipeMap().has(e.recipeId) ? '' : ` · ${t('recipeDeleted')}`}</span>
           ${e.fromBatch ? `<span class="tag confirmed">${t('fromBatchTag')}</span>` : covered.has(e.id) ? `<span class="tag assumed">${t('coveredTag')}</span>` : ''} ${avoidTag(entryRecipe(e))}</span>
         <span class="row">${['assumed', 'confirmed', 'skipped'].map((s) =>
           `<button type="button" data-act="status" data-id="${e.id}" data-status="${s}" aria-pressed="${e.status === s}"${recipeMap().has(e.recipeId) ? '' : ' disabled'}>${t(s)}</button>`).join('')}
           <button type="button" class="ghost danger" data-act="removeMeal" data-id="${e.id}" aria-label="${t('remove')}">✕</button></span></li>`).join('')}</ul>
       <div class="row">
-        <select aria-label="${t('recipes')}" id="add-recipe-${date}">${options(state.recipes, ui.recipeId)}</select>
+        <select class="meal" aria-label="${t('mealType')}" id="add-meal-${date}">${mealOptions('')}</select>
+        <select aria-label="${t('recipes')}" id="add-recipe-${date}">${recipeOptions(ui.recipeId)}</select>
         <input class="num" inputmode="decimal" aria-label="${t('servings')}" id="add-servings-${date}" value="1">
         <button type="button" class="primary" data-act="addMeal" data-date="${date}">${t('addMeal')}</button>
-      </div></div>`;
+      </div>
+      ${entries.length === 0 ? '' : `<div class="row"><label class="inline">${t('copyDayTo')}
+        <select id="copy-to-${date}">${targets.map(([d, label]) => `<option value="${d}">${label}</option>`).join('')}</select></label>
+        <button type="button" data-act="copyDay" data-date="${date}">${t('copyDo')}</button></div>`}</div>`;
   }).join('');
 
   if (!recipeMap().has(ui.recipeId)) ui.recipeId = state.recipes[0].id;
@@ -212,10 +288,12 @@ function viewPlan() {
       <span class="row"><button type="button" data-act="week" data-step="-7">${t('prevWeek')}</button>
       <button type="button" data-act="week" data-step="7">${t('nextWeek')}</button></span></div>
     ${dayBlocks}
-    <p class="muted">${t('assumedNote')}</p>
+    ${weekEntries().length === 0 ? '' : `<div class="row"><button type="button" data-act="copyWeek">${t('copyWeek')}</button></div>`}
+    <p class="muted">${t('assumedNote')} ${t('copyNote')}</p>
   </section>
   <section class="card"><h2>${t('editRecipe')}</h2>
-    <div class="row"><select data-act="pickRecipe" aria-label="${t('recipes')}">${options(state.recipes, ui.recipeId)}</select>
+    <div class="row"><select data-act="pickRecipe" aria-label="${t('recipes')}">${recipeOptions(ui.recipeId)}</select>
+      <button type="button" data-act="favorite" aria-pressed="${isFavourite(ui.recipeId)}">${isFavourite(ui.recipeId) ? '★' : '☆'} ${t('favorite')}</button>
       <button type="button" data-act="newRecipe">${t('newRecipe')}</button>
       ${original ? `<span class="muted">${fmt(recipe.servings)} ${t('servings').toLowerCase()}</span>` : ''}</div>
     ${original ? '' : `<div class="row">
@@ -262,11 +340,34 @@ function viewPlan() {
 }
 
 function viewShop() {
-  const lines = shoppingLines();
-  const bud = budgetText(lines);
+  const today = todayISO();
+  const bud = budgetText(shoppingLines());
   const days = weekDates();
-  const stock = Object.entries(state.pantry).filter(([, g]) => g > 0)
-    .sort((a, b) => nm(foods.get(a[0])).localeCompare(nm(foods.get(b[0])), locale()));
+  // Still to buy first, then what the pantry already covers; grouped by shop section.
+  const lines = shoppingLines().map((l, i) => [l, i]).sort((a, b) => (a[0].purchasedGrams > 0 ? 0 : 1) - (b[0].purchasedGrams > 0 ? 0 : 1) || a[1] - b[1]).map(([l]) => l);
+  const groups = S.bySection(lines, sectionOf, SECTIONS);
+  const sectionName = (s) => t(`sec${s[0].toUpperCase()}${s.slice(1)}`);
+  const stock = [...state.lots].sort((a, b) => nm(foods.get(a.foodId)).localeCompare(nm(foods.get(b.foodId)), locale())
+    || (a.useBy === null) - (b.useBy === null) || (a.useBy ?? '').localeCompare(b.useBy ?? ''));
+  const first = [
+    ...I.useFirst(state.lots, today).map((l) => ({ date: l.useBy, text: `${nm(foods.get(l.foodId))} · ${fmt(l.grams)} g` })),
+    ...state.batches.filter((b) => b.useBy && b.servingsLeft > 0).map((b) => ({ date: b.useBy, text: `${nm(b.snapshot)} · ${fmt(b.servingsLeft, 2)} ${t('servings').toLowerCase()}` })),
+  ].sort((a, b) => a.date.localeCompare(b.date));
+  const row = (l) => {
+    const p = state.prices[l.foodId];
+    const name = nm(foods.get(l.foodId));
+    return `<tr><td class="title">${name}</td>
+        <td class="n" data-label="${t('need')}">${fmt(l.neededGrams)} g</td><td class="n" data-label="${t('fromPantry')}">${fmt(l.fromPantryGrams)} g</td>
+        <td class="n" data-label="${t('packSize')}"><input class="num" inputmode="decimal" data-act="pack" data-food="${l.foodId}" aria-label="${t('packSize')} ${name}" value="${l.packGrams ?? ''}">
+          <div class="muted">${state.packs[l.foodId] ? t('packOwn') : l.packGrams ? t('packAssumed') : t('noPack')}</div></td>
+        <td class="n" data-label="${t('buy')}">${l.packs > 0 ? `${l.packs} ${t('packs')}` : l.toBuyGrams > 0 ? `${fmt(l.toBuyGrams)} g` : '–'}</td>
+        <td class="n" data-label="${t('leftover')}">${fmt(l.leftoverGrams)} g</td>
+        <td class="n" data-label="${t('packPrice')}"><input class="num" inputmode="decimal" data-act="price" data-food="${l.foodId}" aria-label="${t('packPrice')} ${name}" value="${p ? S.formatOre(p.priceOre) : ''}">
+          <div class="muted">${p ? `${p.example ? t('example') : t('priceFrom')} ${shortDate(p.priceDate)}` : t('noPrice')}</div></td>
+        <td class="n" data-label="${t('cost')}">${l.costOre == null ? `<span class="tag assumed">${t('noPrice')}</span>` : kr(l.costOre)}</td>
+        <td class="n" data-label="${t('boughtCol')}">${l.purchasedGrams > 0 ? `<input type="date" id="buy-date-${l.foodId}" aria-label="${t('useBy')} ${name} (${t('optionalWord')})">
+          <button type="button" data-act="boughtOne" data-food="${l.foodId}" aria-label="${t('boughtOne')}: ${name}">${t('boughtOne')}</button>` : `<span class="tag confirmed">${t('inPantryTag')}</span>`}</td></tr>`;
+  };
   return `
   <section class="card">
     <div class="row between"><h2>${t('shoppingList')} · ${shortDate(days[0])} – ${shortDate(days[6])}</h2>
@@ -274,32 +375,24 @@ function viewShop() {
       <button type="button" data-act="week" data-step="7">${t('nextWeek')}</button></span></div>
     ${lines.length === 0 ? `<p class="muted">${t('shopEmpty')}</p>` : `
     <div class="tablewrap"><table class="stack"><thead><tr><th>${t('food')}</th><th class="n">${t('need')}</th><th class="n">${t('fromPantry')}</th>
-      <th class="n">${t('packSize')}</th><th class="n">${t('buy')}</th><th class="n">${t('leftover')}</th><th class="n">${t('packPrice')}</th><th class="n">${t('cost')}</th></tr></thead><tbody>
-      ${lines.map((l) => {
-        const p = state.prices[l.foodId];
-        return `<tr><td class="title">${nm(foods.get(l.foodId))}</td>
-        <td class="n" data-label="${t('need')}">${fmt(l.neededGrams)} g</td><td class="n" data-label="${t('fromPantry')}">${fmt(l.fromPantryGrams)} g</td>
-        <td class="n" data-label="${t('packSize')}"><input class="num" inputmode="decimal" data-act="pack" data-food="${l.foodId}" aria-label="${t('packSize')} ${nm(foods.get(l.foodId))}" value="${l.packGrams ?? ''}">
-          <div class="muted">${state.packs[l.foodId] ? t('packOwn') : l.packGrams ? t('packAssumed') : t('noPack')}</div></td>
-        <td class="n" data-label="${t('buy')}">${l.packs > 0 ? `${l.packs} ${t('packs')}` : l.toBuyGrams > 0 ? `${fmt(l.toBuyGrams)} g` : '–'}</td>
-        <td class="n" data-label="${t('leftover')}">${fmt(l.leftoverGrams)} g</td>
-        <td class="n" data-label="${t('packPrice')}"><input class="num" inputmode="decimal" data-act="price" data-food="${l.foodId}" aria-label="${t('packPrice')} ${nm(foods.get(l.foodId))}" value="${p ? S.formatOre(p.priceOre) : ''}">
-          <div class="muted">${p ? `${p.example ? t('example') : t('priceFrom')} ${shortDate(p.priceDate)}` : t('noPrice')}</div></td>
-        <td class="n" data-label="${t('cost')}">${l.costOre == null ? `<span class="tag assumed">${t('noPrice')}</span>` : kr(l.costOre)}</td></tr>`;
-      }).join('')}
-      </tbody><tfoot><tr><th colspan="7">${t('total')}</th><th class="n">${bud.main}</th></tr></tfoot></table></div>
+      <th class="n">${t('packSize')}</th><th class="n">${t('buy')}</th><th class="n">${t('leftover')}</th><th class="n">${t('packPrice')}</th><th class="n">${t('cost')}</th><th class="n">${t('boughtCol')}</th></tr></thead><tbody>
+      ${groups.map((g) => `<tr class="section"><th colspan="9" scope="colgroup">${sectionName(g.section)}</th></tr>${g.lines.map(row).join('')}`).join('')}
+      </tbody><tfoot><tr><th colspan="7">${t('total')}</th><th class="n">${bud.main}</th><th></th></tr></tfoot></table></div>
     ${bud.sub ? `<p class="muted">${bud.sub}</p>` : ''}
     <div class="row"><button type="button" class="primary" data-act="bought"${lines.every((l) => l.purchasedGrams === 0) ? ' disabled' : ''}>${t('markBought')}</button>
       <button type="button" data-act="examplePrices">${t('examplePrices')}</button></div>`}
     ${coverage().size ? `<p><span class="tag confirmed">${coverage().size}</span> ${t('coveredNote')}</p>` : ''}
-    <p class="muted">${t('shopNote')} ${t('examplePricesNote')}</p>
+    <p class="muted">${t('shopNote')} ${t('examplePricesNote')} ${t('sectionNote')}</p>
+  </section>
+  <section class="card"><h2>${t('useFirstTitle')}</h2>
+    ${first.length === 0 ? `<p class="muted">${t('useFirstEmpty')}</p>` : `<ul class="plain">${first.map((x) => `<li class="row between"><span>${x.text}</span>${dateTag(x.date)}</li>`).join('')}</ul>`}
   </section>
   <section class="card"><h2>${t('pantry')}</h2>
     ${stock.length === 0 ? `<p class="muted">${t('pantryEmpty')}</p>` : `<div class="tablewrap"><table class="stack"><thead><tr><th>${t('food')}</th><th class="n">${t('inStock')}</th><th class="n">${t('useBy')}</th></tr></thead><tbody>
-      ${stock.map(([id, g]) => `<tr><td class="title">${nm(foods.get(id))} ${dateTag(state.pantryDates[id])}</td><td class="n" data-label="${t('inStock')}"><input class="num" inputmode="decimal" data-act="pantry" data-food="${id}" aria-label="${t('inStock')} ${nm(foods.get(id))}" value="${fmt(g, 1).replace(/\s/g, '')}"></td>
-        <td class="n" data-label="${t('useBy')}"><input type="date" data-act="pantryDate" data-food="${id}" aria-label="${t('useBy')} ${nm(foods.get(id))}" value="${state.pantryDates[id] ?? ''}"></td></tr>`).join('')}
-    </tbody></table></div>
-    <p class="muted">${t('dateNote')}</p>`}
+      ${stock.map((l) => `<tr><td class="title">${nm(foods.get(l.foodId))} ${dateTag(l.useBy)}</td><td class="n" data-label="${t('inStock')}"><input class="num" inputmode="decimal" data-act="pantry" data-food="${l.foodId}" data-useby="${l.useBy ?? ''}" aria-label="${t('inStock')} ${nm(foods.get(l.foodId))} ${l.useBy ? shortDate(l.useBy) : ''}" value="${fmt(l.grams, 1).replace(/\s/g, '')}"></td>
+        <td class="n" data-label="${t('useBy')}"><input type="date" data-act="pantryDate" data-food="${l.foodId}" data-useby="${l.useBy ?? ''}" aria-label="${t('useBy')} ${nm(foods.get(l.foodId))} ${l.useBy ? shortDate(l.useBy) : ''}" value="${l.useBy ?? ''}"></td></tr>`).join('')}
+    </tbody></table></div>`}
+    <p class="muted">${t('lotNote')} ${t('dateNote')}</p>
   </section>
   ${viewBatches()}`;
 }
@@ -322,6 +415,8 @@ function viewTrain() {
   const last = T.lastSet(state.workouts, selected);
   const progress = day ? T.dayProgress(day, logs) : [];
   const doneCount = progress.filter((p) => p.complete).length;
+  const suggestion = T.suggestNext(state.workouts, selected, day?.exercises.find((x) => x.exerciseId === selected)?.reps);
+  const history = T.exerciseHistory(state.workouts, selected);
   return `
   <section class="card"><h2>${t('template')}</h2>
     <div class="row"><select data-act="template" aria-label="${t('template')}">${options(allPrograms(), program.id)}</select>
@@ -345,9 +440,21 @@ function viewTrain() {
       <label>${t('exercise')}<select id="set-exercise" data-act="pickExercise">${options(list, selected)}</select></label>
       <label>${t('reps')}<input class="num" inputmode="numeric" id="set-reps" value="${ui.lastReps ?? 5}"></label>
       <label>${t('kg')}<input class="num" inputmode="decimal" id="set-kg" value="${ui.lastKg ?? ''}"></label>
+      <label>${t('rir')}<select id="set-rir"><option value="">–</option>${[0, 1, 2, 3, 4, 5].map((n) => `<option value="${n}">${n}</option>`).join('')}</select></label>
+      <label class="grow">${t('setNote')}<input id="set-note" maxlength="200"></label>
       <button type="button" class="primary" data-act="logSet">${t('logSet')}</button>
     </div>
     <p class="muted">${last ? `${t('lastTime')}: ${fmt(last.kg, 2)} kg × ${last.reps} (${shortDate(last.date)})` : t('neverLogged')}</p>
+    ${suggestion ? `<p><span class="tag assumed">${t('suggestionTag')}</span> ${t('nextTime')}: <strong>${fmt(suggestion.kg, 2)} kg × ${suggestion.reps}</strong>
+      <span class="muted">· ${t(`sug${suggestion.reason[0].toUpperCase()}${suggestion.reason.slice(1)}`)} (${shortDate(suggestion.from.date)}: ${fmt(suggestion.from.kg, 2)} kg × ${suggestion.from.reps.join(', ')})</span>
+      <button type="button" data-act="useSuggestion" data-kg="${suggestion.kg}" data-reps="${suggestion.reps}">${t('useSuggestion')}</button></p>
+    <p class="muted">${t('suggestionNote')}</p>` : ''}
+    <div class="row">
+      <label>${t('restLength')}<select data-act="restSeconds">${REST_CHOICES.map((n) => `<option value="${n}"${n === restSeconds() ? ' selected' : ''}>${n} ${t('secondsWord')}</option>`).join('')}</select></label>
+      <strong id="rest-clock" role="timer">${restText()}</strong>
+      ${ui.restUntil ? `<button type="button" data-act="restStop">${t('restStop')}</button>` : `<button type="button" data-act="restStart">${t('restStart')}</button>`}
+    </div>
+    <p class="muted">${t('restNote')}</p>
     <h3>${t('todaysSets')} · ${shortDate(ui.trainDate)}</h3>
     ${logs.length === 0 ? `<p class="muted">${t('noSets')}</p>` : logs.map((log) => `
       <p><strong>${nm(exMap().get(log.exerciseId))}</strong> <span class="muted">${t('volume')}: ${fmt(T.volume(log.sets))} kg</span></p>
@@ -355,9 +462,18 @@ function viewTrain() {
         const e1 = T.estimated1RM(s.kg, s.reps);
         return `<li class="row between"><span>${fmt(s.kg, 2)} kg × ${s.reps} ${statusTag('confirmed')}
           ${isPR(log, i) ? `<span class="tag confirmed">${t('prBadge')}</span>` : ''}
-          ${e1 ? `<span class="muted">${t('est1rm')}: ${fmt(e1, 1)} kg (${t('estimate')})</span>` : ''}</span>
+          ${e1 ? `<span class="muted">${t('est1rm')}: ${fmt(e1, 1)} kg (${t('estimate')})</span>` : ''}
+          ${s.rir != null ? `<span class="muted">· RIR ${s.rir}</span>` : ''}${s.note ? ` <span class="muted">· ${esc(s.note)}</span>` : ''}</span>
           <button type="button" class="ghost danger" data-act="removeSet" data-ex="${esc(log.exerciseId)}" data-index="${i}" aria-label="${t('remove')}">✕</button></li>`;
       }).join('')}</ul>`).join('')}
+  </section>
+  <section class="card"><h2>${t('progressTitle')} · ${nm(exMap().get(selected))}</h2>
+    ${history.length === 0 ? `<p class="muted">${t('neverLogged')}</p>` : `${exerciseChart(history)}
+    <div class="tablewrap"><table><thead><tr><th>${t('date')}</th><th class="n">${t('topSet')}</th><th class="n">${t('est1rm')}</th><th class="n">${t('volume')}</th><th class="n">${t('setsWord')}</th></tr></thead><tbody>
+      ${history.slice(-8).reverse().map((d) => `<tr><td>${shortDate(d.date)}${d.date.slice(0, 4)}</td><td class="n">${fmt(d.topKg, 2)} kg × ${d.topReps}</td>
+        <td class="n">${d.est1RM == null ? '–' : `${fmt(d.est1RM, 1)} kg`}</td><td class="n">${fmt(d.volume)} kg</td><td class="n">${d.sets}</td></tr>`).join('')}
+    </tbody></table></div>
+    <p class="muted">${t('progressNote')}</p>`}
   </section>
   <section class="card"><h2>${t('recentPRs')}</h2>${prList(prs.slice(-8).reverse())}</section>
   <section class="card"><h2>${t('editProgram')}</h2>
@@ -383,6 +499,44 @@ function viewTrain() {
     <p class="muted">${t('ownExercisesNote')}</p>
   </section>`;
 }
+
+/** Heaviest logged set per training day for one exercise. */
+function exerciseChart(history) {
+  if (history.length < 2) return '';
+  const W = 600, H = 160, pad = 14;
+  const xs = history.map((p) => Date.parse(p.date));
+  const ys = history.map((p) => p.topKg);
+  const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys) - 1, Math.max(...ys) + 1];
+  const X = (v) => pad + ((v - x0) / (x1 - x0 || 1)) * (W - 2 * pad);
+  const Y = (v) => H - pad - ((v - y0) / (y1 - y0 || 1)) * (H - 2 * pad);
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${t('progressTitle')}: ${t('topSet')} ${fmt(ys[0], 2)} → ${fmt(ys.at(-1), 2)} kg">
+    <polyline class="trend" points="${history.map((p, i) => `${X(xs[i]).toFixed(1)},${Y(p.topKg).toFixed(1)}`).join(' ')}"/>
+    ${history.map((p, i) => `<circle class="raw" r="3" cx="${X(xs[i]).toFixed(1)}" cy="${Y(p.topKg).toFixed(1)}"/>`).join('')}</svg>`;
+}
+
+// ---------- rest timer (not stored: it is only a clock on the screen) ----------
+const REST_CHOICES = [60, 90, 120, 180, 240];
+const restSeconds = () => (REST_CHOICES.includes(state.restSeconds) ? state.restSeconds : 120);
+const restLeft = () => (ui.restUntil ? Math.ceil((ui.restUntil - Date.now()) / 1000) : null);
+function restText() {
+  const left = restLeft();
+  if (left == null) return '';
+  return left > 0 ? `${t('rest')}: ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` : t('restOver');
+}
+function startRest() {
+  ui.restUntil = Date.now() + restSeconds() * 1000;
+  ui.restNotified = false;
+}
+setInterval(() => {
+  const el = document.getElementById('rest-clock');
+  if (!ui.restUntil) return;
+  if (el) el.textContent = restText();
+  if (restLeft() <= 0 && !ui.restNotified) {
+    ui.restNotified = true;
+    if (el) el.setAttribute('role', 'status'); // read out once by a screen reader
+    try { navigator.vibrate?.(300); } catch { /* not available: the text is enough */ }
+  }
+}, 500);
 
 function weightChart(trend) {
   if (trend.length < 2) return '';
@@ -413,6 +567,33 @@ function viewWeight() {
       ${[...trend].reverse().map((p) => `<tr><td>${shortDate(p.date)}${p.date.slice(0, 4)}</td><td class="n">${fmt(p.kg, 1)}</td><td class="n">${fmt(p.trendKg, 1)}</td>
         <td class="n"><button type="button" class="ghost danger" data-act="removeWeight" data-date="${p.date}" aria-label="${t('remove')}">✕</button></td></tr>`).join('')}
     </tbody></table></div>`}
+  </section>
+  ${viewMeasures()}`;
+}
+
+function viewMeasures() {
+  const selected = state.measures.some((m) => m.id === ui.measureId) ? ui.measureId : state.measures[0]?.id;
+  return `<section class="card"><h2>${t('measuresTitle')}</h2>
+    ${state.measures.length === 0 ? `<p class="muted">${t('measuresEmpty')}</p>` : `
+    <div class="row">
+      <label>${t('date')}<input type="date" id="m-date" value="${todayISO()}"></label>
+      <label>${t('measure')}<select id="m-measure">${options(state.measures, selected, (m) => esc(m.name))}</select></label>
+      <label>${t('value')}<input class="num" inputmode="decimal" id="m-value"></label>
+      <button type="button" class="primary" data-act="logMeasure">${t('save')}</button></div>
+    ${state.measures.map((m) => {
+      const series = K.measureSeries(state.measurements, m.id);
+      const unit = m.unit ? ` ${esc(m.unit)}` : '';
+      return `<div class="day"><div class="row between"><h3>${esc(m.name)}</h3>
+        <button type="button" class="ghost danger" data-act="removeMeasure" data-id="${esc(m.id)}" aria-label="${t('remove')} ${esc(m.name)}">✕</button></div>
+        ${series.length === 0 ? `<p class="muted">${t('noValues')}</p>` : `<div class="tablewrap"><table><thead><tr><th>${t('date')}</th><th class="n">${t('value')}</th><th class="n">${t('changeSinceFirst')}</th><th></th></tr></thead><tbody>
+          ${[...series].reverse().slice(0, 8).map((x) => `<tr><td>${shortDate(x.date)}${x.date.slice(0, 4)}</td><td class="n">${fmt(x.value, 1)}${unit}</td><td class="n">${signed(x.change, 1)}${unit}</td>
+            <td class="n"><button type="button" class="ghost danger" data-act="removeMeasurement" data-id="${esc(m.id)}" data-date="${x.date}" aria-label="${t('remove')}">✕</button></td></tr>`).join('')}
+        </tbody></table></div>`}</div>`;
+    }).join('')}`}
+    <div class="row"><input class="grow" id="new-measure-name" maxlength="40" aria-label="${t('measureName')}" placeholder="${t('measureNameHint')}">
+      <input class="num" id="new-measure-unit" maxlength="10" aria-label="${t('unit')}" placeholder="${t('unitHint')}">
+      <button type="button" data-act="addMeasure">${t('addMeasure')}</button></div>
+    <p class="muted">${t('measuresNote')}</p>
   </section>`;
 }
 
@@ -481,7 +662,7 @@ function viewWeek() {
     const loggedSets = logs.reduce((acc, w) => acc + w.sets.filter((s) => s.confirmed).length, 0);
     const progress = planned ? T.dayProgress(planned, logs) : [];
     const done = progress.filter((p) => p.complete).length;
-    const meals = state.plan.filter((e) => e.date === date);
+    const meals = P.sortMeals(state.plan.filter((e) => e.date === date));
     const eaten = meals.filter((e) => e.status !== 'skipped');
     const total = N.sum(eaten.map(entryNutrients));
     const adh = K.adherence(meals);
@@ -506,7 +687,25 @@ function viewWeek() {
           <button type="button" data-act="tab" data-tab="plan">${t('tabPlan')}</button></li>` : ''}
       </ul></div>`;
   }).join('');
+  const sum = K.weekSummary(days, state.plan, entryNutrients, state.workouts, state.weights);
+  const weekMeals = weekEntries().filter((e) => e.status !== 'skipped');
+  const mealDays = new Set(weekMeals.map((e) => e.date)).size;
   return `
+  <section class="card"><h2>${t('weekSummary')} · ${shortDate(days[0])} – ${shortDate(days[6])}</h2>
+    <div class="grid">
+      <div><div class="stat">${sum.meals.confirmed} / ${sum.meals.total}</div><div class="muted">${t('mealsConfirmed')}</div>
+        <div class="muted">${statusTag('assumed')} ${sum.meals.assumed} ${statusTag('skipped')} ${sum.meals.skipped}</div></div>
+      <div><div class="stat">${sum.confirmedDays ? `${fmt(sum.confirmed.kcal / sum.confirmedDays)} kcal` : '–'}</div>
+        <div class="muted">${t('confirmedPerDay')}${sum.confirmedDays ? ` · ${fmt(sum.confirmed.protein / sum.confirmedDays)} g protein · ${sum.confirmedDays} ${t('daysWord')}` : ''}</div></div>
+      <div><div class="stat">${sum.trainingDays}</div><div class="muted">${t('trainingDays')} · ${sum.sets} ${t('setsLogged')} · ${fmt(sum.volumeKg)} kg</div></div>
+      <div><div class="stat">${sum.weightChangeKg == null ? '–' : `${signed(sum.weightChangeKg, 1)} kg`}</div><div class="muted">${t('weightTrend')} · ${sum.weighIns} ${t('weighIns')}</div></div>
+    </div>
+    <p class="muted">${t('weekSummaryNote')}</p>
+    <h3>${t('weekWords')}</h3>
+    <p>${weekWords(sum)}</p>
+    <p class="muted">${t('wwNote')}</p>
+    ${microCard(`${t('microWeek')} (${mealDays} ${t('daysWord')})`, weekMeals, mealDays)}
+  </section>
   <section class="card">
     <div class="row between"><h2>${t('week')} ${shortDate(days[0])} – ${shortDate(days[6])}</h2>
       <span class="row"><button type="button" data-act="week" data-step="-7">${t('prevWeek')}</button>
@@ -533,23 +732,31 @@ function viewAssistant() {
   } else if (r && r.actions.length === 0) {
     result = `<p role="status">${t('aiNothing')}</p>${r.rejected ? `<p class="muted">${r.rejected} ${t('aiRejected')}</p>` : ''}`;
   } else if (r) {
-    const byDate = new Map();
-    for (const a of r.actions) byDate.set(a.date, [...(byDate.get(a.date) ?? []), a]);
+    // What the plan would look like, worked out by the app from the approved-to-be actions.
+    let n = 0;
+    const after = applyActions(state.plan, r.actions, () => `sim-${++n}`);
+    const affected = [...new Set(r.actions.flatMap((a) => (a.op === 'move' ? [a.date, a.to] : [a.date])))].sort();
+    const dayName = (d) => `${t('days')[dayIndexOf(d)]} ${shortDate(d)}`;
+    const totalOn = (plan, date) => N.sum(plan.filter((e) => e.date === date && e.status !== 'skipped').map(entryNutrients));
+    const count = (a) => `<span class="muted">${a.entryIds.length} ${t('mealsWord')}</span>`;
     result = `<h3>${t('aiProposal')}</h3>
       <ul class="plain">${r.actions.map((a, i) => {
         const recipe = recipeMap().get(a.recipeId);
-        return `<li class="row between"><span><strong>${t('days')[dayIndexOf(a.date)]} ${shortDate(a.date)}:</strong> ${nm(recipe)} × ${fmt(a.servings, 2)}
-          <span class="muted">${macroLine(N.multiply(N.perServing(recipe, foods), a.servings))}</span> ${avoidTag(recipe)}</span>
+        const what = a.op === 'remove' ? `<strong>${t('aiOpRemove')} · ${dayName(a.date)}:</strong> ${nm(recipe)} ${count(a)}`
+          : a.op === 'move' ? `<strong>${t('aiOpMove')} · ${dayName(a.date)} → ${dayName(a.to)}:</strong> ${nm(recipe)} ${count(a)}`
+          : `<strong>${t('aiOpAdd')} · ${dayName(a.date)}:</strong> ${nm(recipe)} × ${fmt(a.servings, 2)}
+            <span class="muted">${macroLine(N.multiply(N.perServing(recipe, foods), a.servings))}</span> ${avoidTag(recipe)}`;
+        return `<li class="row between"><span>${what}</span>
           <button type="button" class="ghost danger" data-act="aiDrop" data-index="${i}" aria-label="${t('remove')}">✕</button></li>`;
       }).join('')}</ul>
       <div class="tablewrap"><table><thead><tr><th>${t('date')}</th><th class="n">kcal</th><th class="n">Protein</th></tr></thead><tbody>
-      ${[...byDate].map(([date, list]) => {
-        const before = N.sum(state.plan.filter((e) => e.date === date && e.status !== 'skipped').map(entryNutrients));
-        const after = N.sum([before, ...list.map((a) => N.multiply(N.perServing(recipeMap().get(a.recipeId), foods), a.servings))]);
-        return `<tr><td>${t('days')[dayIndexOf(date)]} ${shortDate(date)}</td><td class="n">${fmt(before.kcal)} → <strong>${fmt(after.kcal)}</strong></td><td class="n">${fmt(before.protein)} → <strong>${fmt(after.protein)} g</strong></td></tr>`;
+      ${affected.map((date) => {
+        const was = totalOn(state.plan, date);
+        const will = totalOn(after, date);
+        return `<tr><td>${dayName(date)}</td><td class="n">${fmt(was.kcal)} → <strong>${fmt(will.kcal)}</strong></td><td class="n">${fmt(was.protein)} → <strong>${fmt(will.protein)} g</strong></td></tr>`;
       }).join('')}</tbody></table></div>
       <p class="muted">${t('aiTargets')}: ${state.goal.kcal} kcal · ${state.goal.protein} g protein. ${t('aiNumbersNote')}${r.rejected ? ` ${r.rejected} ${t('aiRejected')}` : ''}</p>
-      <div class="row"><button type="button" class="primary" data-act="aiApply">${t('aiApply')}</button>
+      <div class="row"><button type="button" class="primary" data-act="aiApply">${t(r.actions.every((a) => a.op === 'add') ? 'aiApply' : 'aiApplyChanges')}</button>
         <button type="button" data-act="aiDiscard">${t('aiDiscard')}</button></div>`;
   }
   return `<section class="card"><h2>${t('aiTitle')} <span class="tag ${ai.state === 'ready' ? 'confirmed' : 'skipped'}">${ai.state === 'ready' ? `${t('aiLocal')} · ${esc(ai.model)}` : ai.state === 'checking' ? t('aiChecking') : t('aiOff')}</span></h2>
@@ -621,11 +828,15 @@ function render() {
 }
 
 // ---------- actions ----------
+/** What a meal or a batch took from the stock, lot by lot. Data from before lots existed has only totals: those go back without a date. */
+const takenOf = (x) => x.taken ?? Object.entries(x.consumed ?? {}).map(([foodId, grams]) => ({ foodId, grams, useBy: null }));
+
 /** Undo everything confirming a meal took: raw ingredients back to the pantry, portions back to their batch. */
 function release(entry) {
   if (entry.consumed) {
-    for (const [id, g] of Object.entries(entry.consumed)) state.pantry[id] = (state.pantry[id] ?? 0) + g;
+    state.lots = I.putBack(state.lots, takenOf(entry));
     delete entry.consumed;
+    delete entry.taken;
   }
   if (entry.fromBatch) {
     state.batches = B.giveBack(state.batches, entry.fromBatch);
@@ -646,9 +857,10 @@ function setStatus(entry, status) {
       entry.fromBatch = takes;
     } else {
       const used = S.aggregateNeeds([{ recipeId: entry.recipeId, servings: entry.servings }], recipeMap());
-      const result = I.consume(pantryMap(), used);
-      entry.consumed = Object.fromEntries([...used].map(([id, g]) => [id, g - (result.shortages.get(id) ?? 0)]).filter(([, g]) => g > 0));
-      state.pantry = Object.fromEntries(result.pantry);
+      const result = I.take(state.lots, used, todayISO());
+      entry.consumed = I.takenTotals(result.taken);
+      entry.taken = result.taken;
+      state.lots = result.lots;
       // Freeze what was eaten: later edits to the recipe must not rewrite a confirmed meal.
       entry.snapshot = snapshotOf(recipeMap().get(entry.recipeId));
     }
@@ -664,7 +876,24 @@ const clickActions = {
     const date = el.dataset.date;
     const servings = num(document.getElementById(`add-servings-${date}`).value);
     if (servings == null || servings <= 0 || servings > 50) return commit(t('invalid'));
-    state.plan.push({ id: crypto.randomUUID(), date, recipeId: document.getElementById(`add-recipe-${date}`).value, servings, status: 'assumed' });
+    const meal = document.getElementById(`add-meal-${date}`).value;
+    state.plan.push({ id: crypto.randomUUID(), date, recipeId: document.getElementById(`add-recipe-${date}`).value, servings, status: 'assumed', ...(P.MEAL_TYPES.includes(meal) ? { meal } : {}) });
+    commit();
+  },
+  copyDay: (el) => {
+    const to = document.getElementById(`copy-to-${el.dataset.date}`)?.value;
+    if (!isISODate(to)) return commit(t('invalid'));
+    copyMeals([[el.dataset.date, to]]);
+  },
+  copyWeek: () => {
+    const next = K.addDays(ui.week, 7);
+    const busy = state.plan.some((e) => e.date >= next && e.date <= K.addDays(next, 6));
+    if (busy && !confirm(t('confirmCopyWeek'))) return;
+    copyMeals(weekDates().map((d) => [d, K.addDays(d, 7)]));
+  },
+  favorite: () => {
+    if (!recipeMap().has(ui.recipeId)) return;
+    state.favorites = isFavourite(ui.recipeId) ? state.favorites.filter((id) => id !== ui.recipeId) : [...state.favorites, ui.recipeId];
     commit();
   },
   removeMeal: (el) => {
@@ -689,6 +918,7 @@ const clickActions = {
     // Planned meals of this recipe go too. Confirmed meals are history: they stay, with their snapshot.
     state.plan = state.plan.filter((e) => e.recipeId !== ui.recipeId || (e.status === 'confirmed' && e.snapshot));
     state.recipes = state.recipes.filter((r) => r.id !== ui.recipeId);
+    state.favorites = state.favorites.filter((id) => id !== ui.recipeId);
     ui.recipeId = state.recipes[0].id;
     commit();
   },
@@ -709,8 +939,15 @@ const clickActions = {
     commit();
   },
   bought: () => {
-    state.pantry = Object.fromEntries(I.applyPurchase(pantryMap(), shoppingLines()));
+    state.lots = I.applyPurchase(state.lots, shoppingLines());
     commit(t('boughtDone'));
+  },
+  boughtOne: (el) => {
+    const line = shoppingLines().find((l) => l.foodId === el.dataset.food);
+    const date = document.getElementById(`buy-date-${el.dataset.food}`)?.value ?? '';
+    if (!line || !(line.purchasedGrams > 0) || !(date === '' || isISODate(date))) return commit(t('invalid'));
+    state.lots = I.addLot(state.lots, line.foodId, line.purchasedGrams, date === '' ? null : date);
+    commit(`${foods.get(line.foodId).name[state.lang]}: ${fmt(line.purchasedGrams)} g ${t('boughtOneDone')}`);
   },
   examplePrices: () => {
     // Made-up demo figures (kr. per pack) — flagged as examples, never shown as observed prices.
@@ -725,15 +962,15 @@ const clickActions = {
     const recipe = recipeMap().get(ui.recipeId);
     const servings = num(document.getElementById('cook-servings').value);
     if (!recipe || recipe.ingredients.length === 0 || servings == null || servings <= 0 || servings > 200) return commit(t('invalid'));
-    const r = B.cook(pantryMap(), recipe, servings);
-    state.pantry = Object.fromEntries(r.pantry);
-    state.batches.push({ id: `b-${crypto.randomUUID()}`, recipeId: recipe.id, snapshot: snapshotOf(recipe), cookedDate: todayISO(), servings, servingsLeft: servings, useBy: null, consumed: r.consumed });
+    const r = B.cook(state.lots, recipe, servings, todayISO());
+    state.lots = r.lots;
+    state.batches.push({ id: `b-${crypto.randomUUID()}`, recipeId: recipe.id, snapshot: snapshotOf(recipe), cookedDate: todayISO(), servings, servingsLeft: servings, useBy: null, consumed: r.consumed, taken: r.taken });
     commit(r.shortages.size ? `${t('cooked')} ${r.shortages.size} ${t('cookedShort')}` : t('cooked'));
   },
   undoBatch: (el) => {
     const b = state.batches.find((x) => x.id === el.dataset.id);
     if (!b || b.servingsLeft < b.servings) return commit(t('invalid'));
-    for (const [id, g] of Object.entries(b.consumed)) state.pantry[id] = (state.pantry[id] ?? 0) + g; // exactly what cooking took
+    state.lots = I.putBack(state.lots, takenOf(b)); // exactly what cooking took, back under the dates it came from
     state.batches = state.batches.filter((x) => x.id !== b.id);
     commit();
   },
@@ -761,12 +998,14 @@ const clickActions = {
     if (!text || ui.aiBusy || ui.ai.state !== 'ready') return;
     const ctx = {
       text, lang: state.lang, today: todayISO(), dates: weekDates(),
-      recipes: state.recipes.slice(0, 60).map((r) => ({ id: r.id, name: r.name.da === r.name.en ? r.name.da : `${r.name.da} / ${r.name.en}` })),
+      recipes: state.recipes.slice(0, 60).map((r) => ({ id: r.id, name: recipeLabel(r) })),
     };
     Object.assign(ui, { aiBusy: true, aiText: text, aiResult: null });
     aiAbort = new AbortController();
     render();
-    const result = await assistant.propose(ctx, aiAbort.signal);
+    // The plan is used on this side to check the answer; it is not part of what is sent.
+    const meals = weekEntries().map((e) => ({ id: e.id, recipeId: e.recipeId, date: e.date, status: e.status }));
+    const result = await assistant.propose(ctx, aiAbort.signal, meals);
     aiAbort = null;
     // Keep only proposals that still make sense for the data as it is now.
     if (result.ok) result.actions = result.actions.filter((a) => recipeMap().has(a.recipeId) && weekDates().includes(a.date));
@@ -779,9 +1018,9 @@ const clickActions = {
   aiApply: () => {
     const actions = (ui.aiResult?.ok ? ui.aiResult.actions : []).filter((a) => recipeMap().has(a.recipeId));
     if (actions.length === 0) return;
-    for (const a of actions) state.plan.push({ id: crypto.randomUUID(), date: a.date, recipeId: a.recipeId, servings: a.servings, status: 'assumed' });
+    state.plan = applyActions(state.plan, actions, () => crypto.randomUUID());
     Object.assign(ui, { aiResult: null, aiText: '' });
-    commit(`${actions.length} ${t('aiApplied')}`);
+    commit(`${actions.length} ${t(actions.every((a) => a.op === 'add') ? 'aiApplied' : 'aiChangesApplied')}`);
   },
   aiRecheck: () => { checkAssistant(); render(); },
   pickDay: (el) => { ui.dayIndex = Number(el.dataset.index); render(); },
@@ -792,6 +1031,49 @@ const clickActions = {
     document.getElementById('log-card').scrollIntoView({ block: 'start' });
     document.getElementById('set-kg').focus();
   },
+  addMilestone: () => {
+    const text = document.getElementById('ms-text').value.trim().slice(0, 80);
+    const date = document.getElementById('ms-date').value;
+    if (!text || !(date === '' || isISODate(date)) || state.milestones.length >= 200) return commit(t('invalid'));
+    state.milestones.push({ id: `m-${crypto.randomUUID()}`, text, date: date || null, done: false });
+    commit();
+  },
+  removeMilestone: (el) => { state.milestones = state.milestones.filter((m) => m.id !== el.dataset.id); commit(); },
+  addMeasure: () => {
+    const name = document.getElementById('new-measure-name').value.trim().slice(0, 40);
+    const unit = document.getElementById('new-measure-unit').value.trim().slice(0, 10);
+    if (!name || state.measures.length >= 50) return commit(t('invalid'));
+    const id = `q-${crypto.randomUUID()}`;
+    state.measures.push({ id, name, unit });
+    ui.measureId = id;
+    commit();
+  },
+  removeMeasure: (el) => {
+    if (!confirm(t('confirmRemoveMeasure'))) return;
+    state.measures = state.measures.filter((m) => m.id !== el.dataset.id);
+    state.measurements = state.measurements.filter((m) => m.measureId !== el.dataset.id);
+    commit();
+  },
+  logMeasure: () => {
+    const date = document.getElementById('m-date').value;
+    const measureId = document.getElementById('m-measure').value;
+    const value = num(document.getElementById('m-value').value);
+    if (!isISODate(date) || !state.measures.some((m) => m.id === measureId) || value == null || value < 0 || value > 100000) return commit(t('invalid'));
+    state.measurements = state.measurements.filter((m) => !(m.measureId === measureId && m.date === date)).concat({ date, measureId, value });
+    ui.measureId = measureId;
+    commit();
+  },
+  removeMeasurement: (el) => {
+    state.measurements = state.measurements.filter((m) => !(m.measureId === el.dataset.id && m.date === el.dataset.date));
+    commit();
+  },
+  useSuggestion: (el) => {
+    Object.assign(ui, { lastReps: Number(el.dataset.reps), lastKg: Number(el.dataset.kg) });
+    render();
+    document.getElementById('set-kg').focus();
+  },
+  restStart: () => { startRest(); render(); },
+  restStop: () => { ui.restUntil = null; render(); },
   newProgram: () => {
     const base = currentProgram();
     const id = `g-${crypto.randomUUID()}`;
@@ -867,8 +1149,11 @@ const clickActions = {
     if (!Number.isInteger(reps) || reps < 1 || reps > 100 || kg == null || kg <= 0 || kg > 1000) return commit(t('invalid'));
     let log = state.workouts.find((w) => w.date === ui.trainDate && w.exerciseId === exerciseId);
     if (!log) state.workouts.push((log = { date: ui.trainDate, exerciseId, sets: [] }));
-    log.sets.push({ reps, kg, confirmed: true });
+    const rirText = document.getElementById('set-rir')?.value ?? '';
+    const note = (document.getElementById('set-note')?.value ?? '').trim().slice(0, 200);
+    log.sets.push({ reps, kg, confirmed: true, ...(/^[0-5]$/.test(rirText) ? { rir: Number(rirText) } : {}), ...(note ? { note } : {}) });
     Object.assign(ui, { lastExercise: exerciseId, lastReps: reps, lastKg: kg });
+    startRest();
     commit();
   },
   removeSet: (el) => {
@@ -919,15 +1204,41 @@ const clickActions = {
 
 const changeActions = {
   goal: (el) => {
-    if (el.dataset.field === 'type') state.goal.type = el.value;
-    else {
+    const field = el.dataset.field;
+    if (field === 'type') state.goal.type = el.value;
+    else if (field === 'targetKg') {
+      const v = el.value.trim() === '' ? null : num(el.value);
+      if (el.value.trim() !== '' && (v == null || v < 20 || v > 400)) return commit(t('invalid'));
+      state.goal.targetKg = v;
+    } else if (field === 'deadline') {
+      if (!(el.value === '' || isISODate(el.value))) return commit(t('invalid'));
+      state.goal.deadline = el.value || null;
+    } else {
       const v = num(el.value);
       if (v == null || v <= 0 || v > 20000) return commit(t('invalid'));
-      state.goal[el.dataset.field] = Math.round(v);
+      state.goal[field] = Math.round(v);
     }
+    if (['type', 'kcal', 'protein'].includes(field)) state.goalHistory = K.recordGoal(state.goalHistory, state.goal, todayISO());
+    commit();
+  },
+  milestoneDone: (el) => {
+    const m = state.milestones.find((x) => x.id === el.dataset.id);
+    if (m) m.done = el.checked;
+    commit();
+  },
+  moveMeal: (el) => {
+    if (!isISODate(el.value)) return commit(t('invalid'));
+    state.plan = P.moveMeal(state.plan, el.dataset.id, el.value);
     commit();
   },
   pickRecipe: (el) => { ui.recipeId = el.value; render(); },
+  mealType: (el) => {
+    const entry = state.plan.find((e) => e.id === el.dataset.id);
+    if (!entry) return;
+    if (P.MEAL_TYPES.includes(el.value)) entry.meal = el.value;
+    else delete entry.meal;
+    commit();
+  },
   recipeName: (el) => {
     const name = el.value.trim();
     if (!name || seedRecipes.has(ui.recipeId)) return commit(t('invalid'));
@@ -984,8 +1295,7 @@ const changeActions = {
   pantry: (el) => {
     const g = num(el.value);
     if (g == null || g < 0 || g > 1e6) return commit(t('invalid'));
-    if (g === 0) delete state.pantry[el.dataset.food];
-    else state.pantry[el.dataset.food] = g;
+    state.lots = I.setLot(state.lots, el.dataset.food, el.dataset.useby || null, g);
     commit();
   },
   template: (el) => { state.templateId = el.value; ui.dayIndex = 0; commit(); },
@@ -997,15 +1307,20 @@ const changeActions = {
   shopDay: (el) => { state.shopDay = el.value === '' ? null : Number(el.value); commit(); },
   prepDay: (el) => { state.prepDay = el.value === '' ? null : Number(el.value); commit(); },
   pantryDate: (el) => {
-    if (el.value === '') delete state.pantryDates[el.dataset.food];
-    else if (isISODate(el.value)) state.pantryDates[el.dataset.food] = el.value;
-    else return commit(t('invalid'));
+    if (!(el.value === '' || isISODate(el.value))) return commit(t('invalid'));
+    state.lots = I.redateLot(state.lots, el.dataset.food, el.dataset.useby || null, el.value || null);
     commit();
   },
   batchUseBy: (el) => {
     const b = state.batches.find((x) => x.id === el.dataset.id);
     if (!b || !(el.value === '' || isISODate(el.value))) return commit(t('invalid'));
     b.useBy = el.value === '' ? null : el.value;
+    commit();
+  },
+  restSeconds: (el) => {
+    const n = Number(el.value);
+    if (!REST_CHOICES.includes(n)) return commit(t('invalid'));
+    state.restSeconds = n;
     commit();
   },
   pickExercise: (el) => {
@@ -1041,6 +1356,14 @@ const changeActions = {
     commit(t('importDone'));
   },
 };
+
+/** Adds copies of the meals on the given dates. Copies are planned meals; nothing is confirmed or taken from stock. */
+function copyMeals(pairs) {
+  const result = P.copyMeals(state.plan, pairs, new Set(state.recipes.map((r) => r.id)), () => crypto.randomUUID());
+  state.plan.push(...result.entries);
+  const skipped = result.skipped ? ` ${result.skipped} ${t('copySkipped')}` : '';
+  commit(result.entries.length ? `${result.entries.length} ${t('mealsCopied')}${skipped}` : `${t('nothingToCopy')}${skipped}`);
+}
 
 function setPlanNumber(el, field, max) {
   const x = ownProgram()?.days[Number(el.dataset.day)]?.exercises[Number(el.dataset.index)];

@@ -1,6 +1,6 @@
 // Training arithmetic. Only confirmed (actually logged) sets count toward volume and PRs.
 
-/** @typedef {{ reps: number, kg: number, confirmed: boolean }} WorkoutSet */
+/** @typedef {{ reps: number, kg: number, confirmed: boolean, rir?: number, note?: string }} WorkoutSet  rir = reps in reserve, the user's own rating */
 /** @typedef {{ date: string, exerciseId: string, sets: WorkoutSet[] }} ExerciseLog */
 
 /**
@@ -86,4 +86,51 @@ export function lastSet(logs, exerciseId) {
   if (!log) return null;
   const set = log.sets.filter((s) => s.confirmed).at(-1);
   return { date: log.date, kg: set.kg, reps: set.reps };
+}
+
+/**
+ * One line per training day for an exercise, oldest first: the heaviest confirmed set, the best
+ * estimated 1RM (an estimate, null when no set is within 1–12 reps), volume and number of sets.
+ * @param {ExerciseLog[]} logs
+ */
+export function exerciseHistory(logs, exerciseId) {
+  const byDate = new Map();
+  for (const log of logs) {
+    if (log.exerciseId !== exerciseId) continue;
+    const sets = log.sets.filter((s) => s.confirmed);
+    if (sets.length === 0) continue;
+    byDate.set(log.date, (byDate.get(log.date) ?? []).concat(sets));
+  }
+  return [...byDate].sort((a, b) => a[0].localeCompare(b[0])).map(([date, sets]) => {
+    const top = sets.reduce((best, s) => (s.kg > best.kg || (s.kg === best.kg && s.reps > best.reps) ? s : best));
+    const estimates = sets.map((s) => estimated1RM(s.kg, s.reps)).filter((x) => x != null);
+    return { date, topKg: top.kg, topReps: top.reps, est1RM: estimates.length ? Math.max(...estimates) : null, volume: volume(sets), sets: sets.length };
+  });
+}
+
+/**
+ * A SUGGESTION for the next session of an exercise, worked out from the latest logged day only.
+ * It is arithmetic on the user's own log, not training advice, and the UI must say so.
+ *
+ * Rule: look at the sets done at the heaviest weight that day. If every one of them reached the
+ * target reps, suggest the next weight step at the same reps — unless the last of them was logged
+ * with 0 reps in reserve, in which case the same weight is suggested again. If a set fell short,
+ * the same weight is suggested again. The step is 2.5 kg, or 1 kg below 20 kg.
+ * @param {ExerciseLog[]} logs
+ * @param {string} exerciseId
+ * @param {number} [plannedReps] target reps from the programme; without it, the reps of the last top set
+ * @returns {{ kg: number, reps: number, reason: 'allReps' | 'noReserve' | 'missedReps', from: { date: string, kg: number, reps: number[] } } | null}
+ */
+export function suggestNext(logs, exerciseId, plannedReps) {
+  const days = logs.filter((l) => l.exerciseId === exerciseId && l.sets.some((s) => s.confirmed)).sort((a, b) => a.date.localeCompare(b.date));
+  if (days.length === 0) return null;
+  const date = days.at(-1).date;
+  const sets = days.filter((l) => l.date === date).flatMap((l) => l.sets.filter((s) => s.confirmed));
+  const kg = Math.max(...sets.map((s) => s.kg));
+  const top = sets.filter((s) => s.kg === kg);
+  const reps = Number.isInteger(plannedReps) && plannedReps >= 1 ? plannedReps : top.at(-1).reps;
+  const from = { date, kg, reps: top.map((s) => s.reps) };
+  if (top.some((s) => s.reps < reps)) return { kg, reps, reason: 'missedReps', from };
+  if (top.at(-1).rir === 0) return { kg, reps, reason: 'noReserve', from };
+  return { kg: kg + (kg < 20 ? 1 : 2.5), reps, reason: 'allReps', from };
 }

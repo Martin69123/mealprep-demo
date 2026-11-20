@@ -46,6 +46,13 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 3px s
 input[type="number"], input.num { width: 6.5em; text-align: right; font-variant-numeric: tabular-nums; }
 main > *, .grid > * { min-width: 0; }
 select { max-width: 100%; }
+tr.section th { text-align: left; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); padding-top: 14px; }
+input[type=checkbox] { width: 1.2rem; height: 1.2rem; accent-color: var(--accent); }
+details { margin: 10px 0; }
+summary { cursor: pointer; color: var(--muted); padding: 6px 0; }
+#rest-clock { font-variant-numeric: tabular-nums; min-width: 6.5em; }
+select.meal { font-size: .85rem; padding-block: 2px; }
+label.inline { display: inline-flex; flex-direction: row; align-items: center; gap: 8px; flex-wrap: wrap; }
 input.food { width: 100%; min-width: 9em; }
 input.food.grow { flex: 1 1 9em; width: auto; }
 label { display: grid; gap: 4px; font-size: .88rem; color: var(--muted); }
@@ -82,6 +89,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   table.stack tbody td.title { grid-column: 1 / -1; font-weight: 650; }
   table.stack tbody td.title::before { display: none; }
   table.stack tbody td input.num { width: 100%; text-align: left; }
+  table.stack tbody tr.section { display: block; padding: 14px 0 2px; border-bottom: 0; }
   table.stack tfoot tr { display: flex; justify-content: space-between; }
   table.stack tfoot th { border: 0; font-size: 1rem; color: var(--text); }
 }
@@ -115,3 +123,5 @@ body { -webkit-tap-highlight-color: transparent; overscroll-behavior-y: none; }
   main { padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); }
   body { padding-bottom: calc(70px + env(safe-area-inset-bottom)); }
 }
+label.grow { flex: 1 1 12em; }
+label.grow input { width: 100%; }

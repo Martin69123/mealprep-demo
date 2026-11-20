@@ -17,11 +17,13 @@ export async function status() {
 }
 
 /**
- * Ask the local model for proposed meals and validate the answer. Never rejects.
+ * Ask the local model for proposed changes and validate the answer. Never rejects.
+ * `meals` is the plan as it is now; it is used here to check the answer and is NOT sent anywhere.
  * @param {import('../core/assistant.js').AssistantContext} ctx @param {AbortSignal} signal
+ * @param {{ id: string, recipeId: string, date: string, status: string }[]} [meals]
  * @returns {Promise<{ ok: true, actions: object[], rejected: number, model: string, ms: number } | { ok: false, error: string }>}
  */
-export async function propose(ctx, signal) {
+export async function propose(ctx, signal, meals = []) {
   if (checkContext(ctx).length) return { ok: false, error: 'bad-request' };
   try {
     const res = await fetch('/api/assistant/propose', {
@@ -32,7 +34,7 @@ export async function propose(ctx, signal) {
     });
     const data = await res.json();
     if (!res.ok) return { ok: false, error: typeof data?.error === 'string' ? data.error : 'server' };
-    const parsed = parseProposal(data.raw, ctx);
+    const parsed = parseProposal(data.raw, ctx, meals);
     if (!parsed.ok) return { ok: false, error: 'bad-answer' };
     return { ok: true, actions: parsed.actions, rejected: parsed.rejected, model: String(data.model), ms: Number(data.ms) };
   } catch (err) {
